@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === Binaries (chemins absolus) ===
+RSYNC="/usr/bin/rsync"
+PG_DUMP="/usr/bin/pg_dump"
+SSH="/usr/bin/ssh"
+PHP="/usr/bin/php"
+DATE=$(date +%F-%H%M)
+
+# === Serveur de backup ===
+BACKUP_SERVER="backupuser@192.168.56.10"
+BACKUP_DIR="/home/backupuser/backups/nextcloud"
+
+# === Logs ===
+LOGFILE="/var/log/backup_nextcloud.log"
+exec > >(tee -a $LOGFILE) 2>&1
+
+echo "=== [$(date)] Début du backup Nextcloud ==="
+
+# === Création des dossiers distants ===
+${SSH} ${BACKUP_SERVER} "mkdir -p ${BACKUP_DIR}/{data,db,configs/nginx,configs/apache2,configs/php}"
+
+# === 1. Activer le mode maintenance ===
+echo "[*] Activation du mode maintenance..."
+${PHP} /var/www/nextcloud/occ maintenance:mode --on || echo "Déjà activé"
+
+# === 2. Sauvegarde des données ===
+echo "[*] Sauvegarde des fichiers Nextcloud..."
+${RSYNC} -a --delete /var/www/nextcloud/data/ ${BACKUP_SERVER}:${BACKUP_DIR}/data/
+
+# === 3. Dump PostgreSQL ===
+echo "[*] Dump de la base PostgreSQL..."
+if ! PGPASSWORD="server" ${PG_DUMP} -U nextcloud -h localhost -d nextcloud > /tmp/nextcloud_${DATE}.sql; then
+    echo "[ERREUR] Échec dump PostgreSQL"
+    ${PHP} /var/www/nextcloud/occ maintenance:mode --off
+    exit 1
+fi
+${RSYNC} -a /tmp/nextcloud_${DATE}.sql ${BACKUP_SERVER}:${BACKUP_DIR}/db/
+rm /tmp/nextcloud_${DATE}.sql
+
+# === 4. Sauvegarde des configs ===
+echo "[*] Sauvegarde des configurations..."
+${RSYNC} -a /etc/nginx/   ${BACKUP_SERVER}:${BACKUP_DIR}/configs/nginx/
+${RSYNC} -a /etc/apache2/ ${BACKUP_SERVER}:${BACKUP_DIR}/configs/apache2/
+${RSYNC} -a /etc/php/     ${BACKUP_SERVER}:${BACKUP_DIR}/configs/php/
+
+# === 5. Désactiver le mode maintenance ===
+echo "[*] Désactivation du mode maintenance..."
+${PHP} /var/www/nextcloud/occ maintenance:mode --off
+
+echo "=== [$(date)] Backup Nextcloud terminé avec succès ==="
