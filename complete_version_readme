@@ -1,0 +1,32 @@
+1/Sauvegarde le script :
+
+sudo nano /usr/local/bin/backup_nextcloud.sh
+
+
+(copie/colle le code ci-dessus).
+
+2/Rends-le exécutable :
+
+sudo chmod +x /usr/local/bin/backup_nextcloud.sh
+
+
+3/érifie à la main une première fois :
+
+sudo /usr/local/bin/backup_nextcloud.sh
+
+
+4/Ajoute la tâche cron (backup tous les jours à 2h du matin) :
+
+sudo nano /etc/crontab
+
+
+et ajoute :
+
+0 2 * * * root /usr/local/bin/backup_nextcloud.sh >> /var/log/backup_nextcloud.log 2>&1
+
+
+⚠️ Important pour que cron marche sans interaction :
+
+Assure-toi que ssh backupuser@192.168.56.10 fonctionne sans mot de passe (clé SSH).
+
+Remplace PGPASSWORD="server" par un vrai mot de passe ou mieux → un fichier ~/.pgpass protégé.
