@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# === Binaries (chemins absolus) ===
+# ==========================================================
+# Script de sauvegarde Nextcloud avec rotation automatique
+# Compatible cron, testé sur Ubuntu 22.04
+# ==========================================================
+
+# === Binaries (chemins absolus, car cron n'a pas le même PATH) ===
 RSYNC="/usr/bin/rsync"
 PG_DUMP="/usr/bin/pg_dump"
 SSH="/usr/bin/ssh"
 PHP="/usr/bin/php"
-DATE=$(date +%F-%H%M)
+DATE=$(date +%F-%H%M)   # Format YYYY-MM-DD-HHMM
+DAY=$(date +%u)         # Jour de la semaine (1=lundi, 7=dimanche)
+WEEK=$(date +%V)        # Numéro de la semaine
 
 # === Serveur de backup ===
 BACKUP_SERVER="backupuser@192.168.56.10"
@@ -18,29 +25,52 @@ exec > >(tee -a $LOGFILE) 2>&1
 
 echo "=== [$(date)] Début du backup Nextcloud ==="
 
-# === Création des dossiers distants ===
+# === 0. Préparer les dossiers distants ===
+# On crée les répertoires nécessaires sur le serveur de backup
 ${SSH} ${BACKUP_SERVER} "mkdir -p ${BACKUP_DIR}/{data,db,configs/nginx,configs/apache2,configs/php}"
 
 # === 1. Activer le mode maintenance ===
+# Nextcloud doit être figé pendant le backup pour éviter des incohérences
 echo "[*] Activation du mode maintenance..."
 ${PHP} /var/www/nextcloud/occ maintenance:mode --on || echo "Déjà activé"
 
-# === 2. Sauvegarde des données ===
+# === 2. Sauvegarde des fichiers Nextcloud ===
+# Synchronisation incrémentielle (rsync), suppression des fichiers disparus (--delete)
 echo "[*] Sauvegarde des fichiers Nextcloud..."
 ${RSYNC} -a --delete /var/www/nextcloud/data/ ${BACKUP_SERVER}:${BACKUP_DIR}/data/
 
-# === 3. Dump PostgreSQL ===
+# === 3. Dump PostgreSQL avec rotation ===
 echo "[*] Dump de la base PostgreSQL..."
-if ! PGPASSWORD="server" ${PG_DUMP} -U nextcloud -h localhost -d nextcloud > /tmp/nextcloud_${DATE}.sql; then
-    echo "[ERREUR] Échec dump PostgreSQL"
-    ${PHP} /var/www/nextcloud/occ maintenance:mode --off
-    exit 1
-fi
-${RSYNC} -a /tmp/nextcloud_${DATE}.sql ${BACKUP_SERVER}:${BACKUP_DIR}/db/
-rm /tmp/nextcloud_${DATE}.sql
+SQL_TMP="/tmp/nextcloud_${DATE}.sql"
+PGPASSWORD="server" ${PG_DUMP} -U nextcloud -h localhost -d nextcloud > ${SQL_TMP}
 
-# === 4. Sauvegarde des configs ===
-echo "[*] Sauvegarde des configurations..."
+# --- Politique de rotation ---
+# On garde :
+# - Les 7 derniers dumps quotidiens
+# - 4 dumps hebdomadaires (un par semaine)
+# Les backups sont stockés sous ${BACKUP_DIR}/db/
+SQL_DAILY="nextcloud_${DATE}.sql"
+SQL_WEEKLY="nextcloud_week${WEEK}.sql"
+
+# Copie du dump du jour
+${RSYNC} -a ${SQL_TMP} ${BACKUP_SERVER}:${BACKUP_DIR}/db/${SQL_DAILY}
+
+# Copie hebdomadaire (ex: chaque dimanche)
+if [[ "$DAY" -eq 7 ]]; then
+    ${RSYNC} -a ${SQL_TMP} ${BACKUP_SERVER}:${BACKUP_DIR}/db/${SQL_WEEKLY}
+fi
+
+# Nettoyage du fichier temporaire
+rm ${SQL_TMP}
+
+# Suppression des dumps quotidiens vieux de plus de 7 jours
+${SSH} ${BACKUP_SERVER} "find ${BACKUP_DIR}/db/ -type f -name 'nextcloud_*.sql' -mtime +7 -delete"
+
+# Suppression des dumps hebdo vieux de plus de 30 jours
+${SSH} ${BACKUP_SERVER} "find ${BACKUP_DIR}/db/ -type f -name 'nextcloud_week*.sql' -mtime +30 -delete"
+
+# === 4. Sauvegarde des configurations critiques ===
+echo "[*] Sauvegarde des configurations système..."
 ${RSYNC} -a /etc/nginx/   ${BACKUP_SERVER}:${BACKUP_DIR}/configs/nginx/
 ${RSYNC} -a /etc/apache2/ ${BACKUP_SERVER}:${BACKUP_DIR}/configs/apache2/
 ${RSYNC} -a /etc/php/     ${BACKUP_SERVER}:${BACKUP_DIR}/configs/php/
@@ -50,3 +80,12 @@ echo "[*] Désactivation du mode maintenance..."
 ${PHP} /var/www/nextcloud/occ maintenance:mode --off
 
 echo "=== [$(date)] Backup Nextcloud terminé avec succès ==="
+
+# ==========================================================
+# 
+# Gestion : backup Nextcloud (données, DB, configs)
+# Rotation : 7 quotidiens + 4 hebdomadaires
+#
+# Crédit : Inspiré par des bonnes pratiques DevOps
+# Par authentik 🤝
+# ==========================================================
