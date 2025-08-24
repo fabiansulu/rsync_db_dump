@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BACKUP_DIR="backupuser@192.168.56.10:/home/backupuser/backups/nextcloud"
+DATE=$(date +%F-%H%M)
+
+#1. Maintenance mode
+sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on
+
+#2. les données
+rsync -a --delete /var/www/nextcloud/data/ ${BACKUP_DIR}/data/
+
+#3. db dump
+PGPASSWORD="server" pg_dump -U nextcloud -h localhost -d nextcloud > /tmp/nextcloud_${DATE}.sql
+rsync -a /tmp/nextcloud_${DATE}.sql ${BACKUP_DIR}/db/
+rm /tmp/nextcloud_${DATE}.sql
+
+#4. les configs à copier
+rsync -a /etc/nginx/ ${BACKUP_DIR}/configs/nginx/
+rsync -a /etc/apache2/ ${BACKUP_DIR}/configs/apache2/
+rsync -a /etc/php/ ${BACKUP_DIR}/configs/php/
+
+#5. désactivation du mode maintenance
+sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off
